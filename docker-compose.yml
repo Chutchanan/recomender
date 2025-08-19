@@ -1,0 +1,94 @@
+services:
+  # PostgreSQL Database
+  database:
+    image: postgres:15
+    container_name: restaurant_db
+    environment:
+      POSTGRES_DB: restaurant_recommendation
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      LC_COLLATE: C
+      LC_CTYPE: C
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d restaurant_recommendation"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Data loader (run once to populate database)
+  data-loader:
+    build:
+      context: .
+      target: data-loader
+    container_name: restaurant_data_loader
+    depends_on:
+      database:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password@database:5432/restaurant_recommendation
+    profiles:
+      - setup  # Only run when explicitly requested
+    networks:
+      - app-network
+
+  # Restaurant Recommendation API
+  api:
+    build:
+      context: .
+      target: production
+    container_name: restaurant_api
+    ports:
+      - "8000:8000"
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:password@database:5432/restaurant_recommendation
+      - MODEL_PATH=/app/data/model.pt
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+    volumes:
+      - ./data:/app/data:ro  # Read-only model file
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - app-network
+
+  # Nginx reverse proxy (optional - for production)
+  nginx:
+    image: nginx:alpine
+    container_name: restaurant_nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./deployment/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    profiles:
+      - production  # Only for production deployment
+    networks:
+      - app-network
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  app-network:
+    driver: bridge

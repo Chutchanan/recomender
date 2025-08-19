@@ -1,0 +1,34 @@
+# Core ML dependencies (from original)
+numpy==2.2.5
+pandas==2.2.3
+pyarrow==19.0.1
+torch==2.6.0
+tqdm==4.67.1
+
+# FastAPI and web dependencies
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.5
+pydantic-settings==2.7.0
+
+# Database dependencies
+asyncpg==0.30.0
+sqlalchemy[asyncio]==2.0.37
+alembic==1.14.0
+
+# Geospatial dependencies (Python 3.13 compatible)
+geoalchemy2==0.15.2
+h3==4.3.1
+geopy==2.4.1
+
+# Performance and monitoring
+httpx==0.28.1
+psutil==6.1.1
+
+# Development and testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-mock==3.14.0
+
+# Optional: Redis for caching
+redis[hiredis]==5.2.1
