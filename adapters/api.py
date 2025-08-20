@@ -1,44 +1,38 @@
-# adapters/api.py - FastAPI controllers and endpoints
+# adapters/api.py - Simplified FastAPI with single prediction endpoint
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List
 import time
 import logging
-import sys
-from pathlib import Path
 
-# Add project root to path
-project_root = Path(__file__).parent.parent
-sys.path.append(str(project_root))
-
-from domain.models import RecommendationRequest, Recommendation
-from usecases.recommendation_service import RecommendationService
-from adapters.database import get_db_session, PostgreSQLUserRepository, PostgreSQLRestaurantRepository
-from adapters.ml_model import get_model_service
+from services.recommend_model import get_model_service
+from adapters.database import get_db_session, check_db_health
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Pydantic schemas for API
-class RecommendationRequestSchema(BaseModel):
-    candidate_restaurant_ids: List[int] = Field(..., description="List of candidate restaurant IDs")
+# Pydantic schemas
+class RecommendationRequest(BaseModel):
+    candidate_restaurant_ids: List[int] = Field(..., description="List of candidate restaurant IDs", min_items=1, max_items=1500)
     latitude: float = Field(..., description="User's latitude", ge=-90, le=90)
     longitude: float = Field(..., description="User's longitude", ge=-180, le=180)
-    size: int = Field(20, description="Number of recommended restaurants", ge=1, le=100)
-    max_dist: int = Field(5000, description="Max distance in meters", ge=100, le=50000)
+    size: int = Field(..., description="Number of recommended restaurants", ge=1, le=500)
+    max_dist: int = Field(..., description="Max distance in meters", ge=100, le=100000)
     sort_dist: bool = Field(False, description="Sort by distance instead of score")
 
-class RecommendationSchema(BaseModel):
-    id: int = Field(..., description="Restaurant ID")
+class RecommendationResponse(BaseModel):
+    restaurant_id: int = Field(..., description="Restaurant ID")
     score: float = Field(..., description="Click probability score", ge=0, le=1)
+    latitude: float = Field(..., description="Restaurant latitude")
+    longitude: float = Field(..., description="Restaurant longitude")
     displacement: float = Field(..., description="Distance in meters", ge=0)
 
-class RecommendationResponseSchema(BaseModel):
-    restaurants: List[RecommendationSchema] = Field(..., description="List of recommended restaurants")
-    total_candidates: int = Field(..., description="Total candidate restaurants processed")
+class PredictionResult(BaseModel):
+    user_id: str = Field(..., description="User ID")
+    recommendations: List[RecommendationResponse] = Field(..., description="List of recommendations")
+    total_candidates: int = Field(..., description="Total candidate restaurants")
     processing_time_ms: float = Field(..., description="Processing time in milliseconds")
 
 class HealthResponseSchema(BaseModel):
@@ -46,24 +40,18 @@ class HealthResponseSchema(BaseModel):
     timestamp: float
     model_loaded: bool
     database_connected: bool
-    
-class ModelInfoSchema(BaseModel):
-    model_info: dict
-    performance_stats: dict
 
 # Create FastAPI app
 app = FastAPI(
     title="Restaurant Recommendation API",
-    description="High-performance restaurant recommendation service using ML",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
+    description="Simple restaurant recommendation service using PostgreSQL + model.pt",
+    version="3.0.0"
 )
 
 # Add middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -77,20 +65,10 @@ async def performance_middleware(request, call_next):
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
     
-    # Log slow requests
-    if process_time > 0.1:  # 100ms threshold
+    if process_time > 0.1:
         logger.warning(f"Slow request: {request.url.path} took {process_time*1000:.2f}ms")
     
     return response
-
-# Dependency injection
-async def get_recommendation_service(session = Depends(get_db_session)):
-    """Create recommendation service with dependencies"""
-    user_repo = PostgreSQLUserRepository(session)
-    restaurant_repo = PostgreSQLRestaurantRepository(session)
-    model_repo = get_model_service()
-    
-    return RecommendationService(user_repo, restaurant_repo, model_repo)
 
 # Health check endpoint
 @app.get("/health", response_model=HealthResponseSchema)
@@ -99,9 +77,6 @@ async def health_check():
     try:
         model_service = get_model_service()
         model_healthy = await model_service.health_check()
-        
-        # Test database connection
-        from adapters.database import check_db_health
         db_healthy = await check_db_health()
         
         return HealthResponseSchema(
@@ -118,148 +93,85 @@ async def health_check():
             detail="Service unhealthy"
         )
 
-# Model info endpoint
-@app.get("/model/info", response_model=ModelInfoSchema)
-async def get_model_info():
-    """Get model information and performance stats"""
-    try:
-        model_service = get_model_service()
-        model_info = model_service.get_model_info()
-        
-        # Add performance stats
-        performance_stats = {
-            "estimated_rps_capacity": 1000,  # From our test results
-            "avg_inference_time_ms": 1.0,
-            "batch_processing": True,
-            "device": str(model_service.device)
-        }
-        
-        return ModelInfoSchema(
-            model_info=model_info,
-            performance_stats=performance_stats
-        )
-        
-    except Exception as e:
-        logger.error(f"Model info failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Model service unavailable"
-        )
-
 # Main recommendation endpoint
-@app.post("/recommend/{user_id}", response_model=RecommendationResponseSchema)
+@app.post("/recommend/{user_id}", response_model=PredictionResult)
 async def recommend_restaurants(
     user_id: str,
-    request: RecommendationRequestSchema,
-    service: RecommendationService = Depends(get_recommendation_service)
+    request: RecommendationRequest
 ):
     """
-    Generate restaurant recommendations for a user
+    Get restaurant recommendations using PostgreSQL data + model.pt
     
-    - **user_id**: User identifier (e.g., 'u00000')
-    - **candidate_restaurant_ids**: List of restaurant IDs to consider
+    - **user_id**: User identifier (e.g., '0', '1', 'u00000')
+    - **candidate_restaurant_ids**: List of restaurant IDs to score (1-1500 items)
     - **latitude**: User's current latitude
     - **longitude**: User's current longitude  
-    - **size**: Number of recommendations to return (default: 20)
-    - **max_dist**: Maximum distance in meters (default: 5000)
+    - **size**: Number of recommendations to return (required)
+    - **max_dist**: Maximum distance in meters (required)
     - **sort_dist**: Sort by distance instead of score (default: false)
+    
+    Returns recommendations sorted by predicted click probability (highest first) or distance
     """
     start_time = time.time()
     
     try:
-        # Validate input
-        if not request.candidate_restaurant_ids:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="candidate_restaurant_ids cannot be empty"
+        # Get database session using Depends injection
+        session = get_db_session()
+        async with session.__anext__() as db_session:
+            # Get model service
+            model_service = get_model_service()
+            
+            # Get predictions with location filtering
+            results = await model_service.predict_restaurants_for_user_with_location(
+                db_session, user_id, request.candidate_restaurant_ids,
+                request.latitude, request.longitude, 
+                request.max_dist, request.size, request.sort_dist
             )
-        
-        if len(request.candidate_restaurant_ids) > 500:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Too many candidate restaurants (max: 500)"
+            
+            # Format response
+            recommendations = [
+                RecommendationResponse(
+                    restaurant_id=result["restaurant_id"],
+                    score=result["score"],
+                    latitude=result["latitude"],
+                    longitude=result["longitude"],
+                    displacement=result["displacement"]
+                )
+                for result in results
+            ]
+            
+            processing_time = (time.time() - start_time) * 1000
+            
+            return PredictionResult(
+                user_id=user_id,
+                recommendations=recommendations,
+                total_candidates=len(request.candidate_restaurant_ids),
+                processing_time_ms=processing_time
             )
-        
-        # Convert to domain model
-        domain_request = RecommendationRequest(
-            user_id=user_id,
-            candidate_restaurant_ids=request.candidate_restaurant_ids,
-            latitude=request.latitude,
-            longitude=request.longitude,
-            size=request.size,
-            max_dist=request.max_dist,
-            sort_dist=request.sort_dist
-        )
-        
-        # Generate recommendations
-        recommendations = await service.generate_recommendations(domain_request)
-        
-        # Convert to response schema
-        restaurant_schemas = [
-            RecommendationSchema(
-                id=rec.restaurant_id,
-                score=rec.score,
-                displacement=rec.displacement
-            )
-            for rec in recommendations
-        ]
-        
-        processing_time = (time.time() - start_time) * 1000
-        
-        return RecommendationResponseSchema(
-            restaurants=restaurant_schemas,
-            total_candidates=len(request.candidate_restaurant_ids),
-            processing_time_ms=processing_time
-        )
-        
+            
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=str(e)
         )
     except Exception as e:
-        logger.error(f"Recommendation failed for user {user_id}: {e}")
+        logger.error(f"Prediction failed for user {user_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
         )
 
-# Performance testing endpoint (optional - remove in production)
-@app.post("/test/performance")
-async def test_performance(
-    batch_size: int = 10,
-    iterations: int = 5
-):
-    """Test endpoint performance (development only)"""
+# Model info endpoint
+@app.get("/model/info")
+async def get_model_info():
+    """Get model information"""
     try:
         model_service = get_model_service()
-        
-        times = []
-        for _ in range(iterations):
-            # Simulate batch prediction
-            user_features = [0.1] * 30
-            restaurant_features_list = [[0.2 + i * 0.01] * 10 for i in range(batch_size)]
-            
-            start_time = time.time()
-            scores = await model_service.predict_for_user_restaurants(user_features, restaurant_features_list)
-            end_time = time.time()
-            
-            times.append(end_time - start_time)
-        
-        avg_time = sum(times) / len(times)
-        
-        return {
-            "batch_size": batch_size,
-            "iterations": iterations,
-            "avg_time_ms": avg_time * 1000,
-            "time_per_item_ms": avg_time * 1000 / batch_size,
-            "estimated_rps": 1 / avg_time
-        }
-        
+        return model_service.get_model_info()
     except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Model service unavailable"
         )
 
 # Root endpoint
@@ -268,8 +180,16 @@ async def root():
     """Root endpoint with API information"""
     return {
         "service": "Restaurant Recommendation API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/health",
-        "main_endpoint": "/recommend/{user_id}"
+        "version": "3.0.0",
+        "description": "PostgreSQL + model.pt predictions",
+        "main_endpoint": "POST /recommend/{user_id}",
+        "health_check": "GET /health",
+        "documentation": "GET /docs",
+        "example_request": {
+            "method": "POST",
+            "url": "/recommend/0",
+            "body": {
+                "candidate_restaurant_ids": [1, 2, 3, 4, 5]
+            }
+        }
     }

@@ -1,4 +1,4 @@
-# Dockerfile - Multi-stage build for the complete application
+# Dockerfile - Simple copy with .dockerignore exclusions
 FROM python:3.11-slim as base
 
 # Set working directory
@@ -18,7 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Production stage for API serving
 FROM base as production
 
-# Copy application code
+# Copy everything except what's excluded in .dockerignore
 COPY . .
 
 # Create non-root user for security
@@ -36,12 +36,7 @@ EXPOSE 8000
 # Run API server
 CMD ["python", "main.py"]
 
-# Development stage (for local development)
-FROM base as development
-COPY . .
-CMD ["python", "main.py"]
-
 # Data loading stage (for initial data setup)
 FROM base as data-loader
 COPY . .
-CMD ["python", "load_data_simple.py"]
+CMD ["python", "scripts/load_data.py"]

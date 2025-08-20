@@ -1,0 +1,38 @@
+# .dockerignore - Exclude only large/unnecessary folders
+
+# Virtual environments (never needed in container)
+venv/
+env/
+.venv/
+.env/
+
+# Large data folders (mounted as volumes instead)
+data/train/
+data/test/
+
+# Python cache files
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Git files
+.git/
+.gitignore
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Logs
+*.log

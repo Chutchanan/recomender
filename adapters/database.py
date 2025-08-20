@@ -1,13 +1,33 @@
-# adapters/database.py - PostgreSQL implementation
+# adapters/database.py - PostgreSQL implementation with Domain Models
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Integer, Float, text, select
 from typing import List, Optional, AsyncGenerator
-import asyncio
+from dataclasses import dataclass
 from config import settings
-from domain.models import User, Restaurant, UserRepository, RestaurantRepository
 
-# SQLAlchemy Models (matching your schema)
+# Domain Models (moved from ml_model.py)
+@dataclass
+class User:
+    id: str
+    features: List[float]  # f00-f29 (30 features)
+    
+    def __post_init__(self):
+        if len(self.features) != 30:
+            raise ValueError(f"User features must have 30 elements, got {len(self.features)}")
+
+@dataclass 
+class Restaurant:
+    id: int
+    features: List[float]  # f00-f09 (10 features)
+    latitude: float
+    longitude: float
+    
+    def __post_init__(self):
+        if len(self.features) != 10:
+            raise ValueError(f"Restaurant features must have 10 elements, got {len(self.features)}")
+
+# SQLAlchemy Models
 class Base(DeclarativeBase):
     pass
 
@@ -95,7 +115,7 @@ async def init_db():
         echo=settings.DATABASE_ECHO,
         pool_size=settings.DB_POOL_SIZE,
         max_overflow=settings.DB_MAX_OVERFLOW,
-        pool_pre_ping=True  # Verify connections before use
+        pool_pre_ping=True
     )
     
     SessionLocal = async_sessionmaker(
@@ -121,46 +141,20 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
         finally:
             await session.close()
 
-# Repository Implementations
-class PostgreSQLUserRepository(UserRepository):
-    def __init__(self, session: AsyncSession):
-        self.session = session
-    
-    async def get_user(self, user_id: str) -> Optional[User]:
-        """Get user by ID"""
-        stmt = select(UserModel).where(UserModel.user_id == user_id)
-        result = await self.session.execute(stmt)
-        user_model = result.scalar_one_or_none()
-        
-        return user_model.to_domain() if user_model else None
+# Repository Functions
+async def get_user(session: AsyncSession, user_id: str) -> Optional[User]:
+    """Get user by ID"""
+    stmt = select(UserModel).where(UserModel.user_id == user_id)
+    result = await session.execute(stmt)
+    user_model = result.scalar_one_or_none()
+    return user_model.to_domain() if user_model else None
 
-class PostgreSQLRestaurantRepository(RestaurantRepository):
-    def __init__(self, session: AsyncSession):
-        self.session = session
-    
-    async def get_restaurants(self, restaurant_ids: List[int]) -> List[Restaurant]:
-        """Get restaurants by IDs"""
-        stmt = select(RestaurantModel).where(RestaurantModel.restaurant_id.in_(restaurant_ids))
-        result = await self.session.execute(stmt)
-        restaurant_models = result.scalars().all()
-        
-        return [model.to_domain() for model in restaurant_models]
-    
-    async def get_restaurants_in_radius(self, lat: float, lon: float, radius_m: int) -> List[Restaurant]:
-        """Get restaurants within radius using spatial query"""
-        # Simple distance calculation (for PostGIS, you'd use ST_DWithin)
-        # Approximation: 1 degree ≈ 111km
-        radius_deg = radius_m / 111000.0
-        
-        stmt = select(RestaurantModel).where(
-            (RestaurantModel.latitude.between(lat - radius_deg, lat + radius_deg)) &
-            (RestaurantModel.longitude.between(lon - radius_deg, lon + radius_deg))
-        )
-        
-        result = await self.session.execute(stmt)
-        restaurant_models = result.scalars().all()
-        
-        return [model.to_domain() for model in restaurant_models]
+async def get_restaurants(session: AsyncSession, restaurant_ids: List[int]) -> List[Restaurant]:
+    """Get restaurants by IDs"""
+    stmt = select(RestaurantModel).where(RestaurantModel.restaurant_id.in_(restaurant_ids))
+    result = await session.execute(stmt)
+    restaurant_models = result.scalars().all()
+    return [model.to_domain() for model in restaurant_models]
 
 # Health check function
 async def check_db_health() -> bool:

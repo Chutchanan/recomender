@@ -17,7 +17,7 @@ sys.path.append(str(project_root))
 API_BASE_URL = "http://localhost:8000"
 TARGET_RPS = 30
 TEST_DURATION = 60  # seconds
-DATA_FILE = Path("data/requests.parquet")
+DATA_FILE = Path("../data/requests.parquet")
 
 class PerformanceTest:
     def __init__(self):
